@@ -1,19 +1,13 @@
-
 <!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Аист-скакун</title>
-   <style>
+  <style>
     html, body { margin: 0; padding: 0; height: 100%; background: #111; overflow: hidden; touch-action: none; }
-    body { display: flex; align-items: center; justify-content: center; height: 100dvh; }
-    canvas {
-      width: min(100vw, calc(100dvh * 4 / 3));
-      height: auto;
-      aspect-ratio: 4 / 3;
-      display: block;
-    }
+    body { display: flex; align-items: center; justify-content: center; }
+    canvas { display: block; }
   </style>
 </head>
 <body>
@@ -24,10 +18,8 @@
     const ctx = canvas.getContext('2d');
 
     // --- КОНСТАНТЫ ---
-    const WIDTH = 800, HEIGHT = 600;
     const GROUND_H = 60;
     const GRASS_DEPTH = 25;
-    const STAND_Y = HEIGHT - GROUND_H + GRASS_DEPTH;
     const GRAVITY = 1;
     const JUMP_SPEED = -21;
     const PLAYER_HITBOX_SHRINK_X = 45;
@@ -37,6 +29,10 @@
     const RUN_FRAME_TICKS = 6;
     const START_FRAME_TICKS = 12;
     const GAP_GROWTH = 1.15; // сила облегчения с ростом скорости (1 = как было, выше = легче)
+
+    // Размеры канваса динамические: подстраиваются под экран
+    let WIDTH = 800, HEIGHT = 600;
+    let STAND_Y = HEIGHT - GROUND_H + GRASS_DEPTH;
 
     const STATE_MENU = 'menu', STATE_PLAYING = 'playing', STATE_GAMEOVER = 'gameover';
     const STATE_PAUSED = 'paused', STATE_CHECKPOINT = 'checkpoint';
@@ -120,6 +116,55 @@
     function scoreMultiplier() {
       const stage = Math.floor((worldSpeed - 6) / 2);
       return Math.min(8, Math.pow(2, stage));
+    }
+
+    // --- КНОПКИ ПАУЗЫ ---
+    const pauseButtons = {
+      resume: { x: WIDTH / 2 - 140, y: 320, w: 280, h: 65, text: 'ПРОДОЛЖИТЬ', font: 32 },
+      menu:   { x: WIDTH / 2 - 140, y: 410, w: 280, h: 65, text: 'НА ГЛАВНЫЙ ЭКРАН', font: 22 }
+    };
+
+    // --- КНОПКИ ЭКРАНА «КОНЕЦ ИГРЫ» ---
+    const gameoverButtons = {
+      menu: { x: WIDTH / 2 - 140, y: HEIGHT / 2 + 130, w: 280, h: 65, text: 'В ГЛАВНОЕ МЕНЮ', font: 22 }
+    };
+
+    // --- ДИНАМИЧЕСКИЙ РАЗМЕР ЭКРАНА ---
+    // В горизонтали канвас становится шире (высота 600, ширина — по пропорциям экрана),
+    // в вертикали остаётся 4:3, как раньше. Игра всегда заполняет экран целиком.
+    function resizeCanvas() {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const aspect = vw / vh;
+
+      if (aspect >= 1) {
+        HEIGHT = 600;
+        WIDTH = Math.max(800, Math.min(1920, Math.round(600 * aspect)));
+      } else {
+        WIDTH = 800;
+        HEIGHT = 600;
+      }
+
+      canvas.width = WIDTH;
+      canvas.height = HEIGHT;
+      STAND_Y = HEIGHT - GROUND_H + GRASS_DEPTH;
+
+      // Пересчёт того, что зависит от размеров
+      if (player.onGround) player.bottom = STAND_Y;
+      for (const obs of obstacles) obs.y = STAND_Y - obs.h;
+      for (const c of clouds) { c.x = randomInt(-100, WIDTH); c.y = randomInt(30, HEIGHT / 2); }
+      pauseBtn.x = WIDTH - 70;
+
+      // Кнопки паузы и экрана поражения — всегда по центру текущего канваса
+      pauseButtons.resume.x = WIDTH / 2 - 140;
+      pauseButtons.menu.x   = WIDTH / 2 - 140;
+      pauseButtons.resume.y = HEIGHT / 2 + 20;
+      pauseButtons.menu.y   = HEIGHT / 2 + 110;
+      gameoverButtons.menu.x = WIDTH / 2 - 140;
+      gameoverButtons.menu.y = HEIGHT / 2 + 130;
+
+      // CSS-размер: в горизонтали весь экран, в вертикали 4:3 по ширине
+      canvas.style.width = vw + 'px';
+      canvas.style.height = (aspect >= 1 ? vh : Math.round(vw * 3 / 4)) + 'px';
     }
 
     function resetGame() {
@@ -214,21 +259,18 @@
       }
     });
 
-    // --- КНОПКИ ПАУЗЫ ---
-    const pauseButtons = {
-      resume: { x: WIDTH / 2 - 140, y: 320, w: 280, h: 65, text: 'ПРОДОЛЖИТЬ', font: 32 },
-      menu:   { x: WIDTH / 2 - 140, y: 410, w: 280, h: 65, text: 'НА ГЛАВНЫЙ ЭКРАН', font: 22 }
-    };
-
-    // --- КНОПКИ ЭКРАНА «КОНЕЦ ИГРЫ» ---
-    const gameoverButtons = {
-      menu: { x: WIDTH / 2 - 140, y: HEIGHT / 2 + 130, w: 280, h: 65, text: 'В ГЛАВНОЕ МЕНЮ', font: 22 }
-    };
-
     // --- ВЫБОР СПРАЙТА ПРЕПЯТСТВИЯ ---
     function getObstacleSprite() {
       const loaded = obstacleVariants.filter(s => s.img);
       return loaded.length ? loaded[randomInt(0, loaded.length - 1)] : obstacleImg;
+    }
+
+    // Фон «с заполнением»: растягивается пропорционально, лишнее обрезается
+    function drawCover(img) {
+      if (!img) return;
+      const scale = Math.max(WIDTH / img.width, HEIGHT / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      ctx.drawImage(img, (WIDTH - w) / 2, (HEIGHT - h) / 2, w, h);
     }
 
     // --- ОБНОВЛЕНИЕ ---
@@ -352,7 +394,7 @@
       const loadedStart = startFrames.filter(s => s.img);
       if (loadedStart.length) {
         const frameIdx = Math.floor(tick / START_FRAME_TICKS) % loadedStart.length;
-        drawSprite(loadedStart[frameIdx], 0, 0, WIDTH, HEIGHT);
+        drawCover(loadedStart[frameIdx].img);
       } else {
         ctx.fillStyle = '#1e5f8a';
         ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -391,7 +433,7 @@
       const loadedBonus = bonusFrames.filter(s => s.img);
       if (loadedBonus.length) {
         const frameIdx = Math.floor(tick / START_FRAME_TICKS) % loadedBonus.length;
-        drawSprite(loadedBonus[frameIdx], 0, 0, WIDTH, HEIGHT);
+        drawCover(loadedBonus[frameIdx].img);
       } else {
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.fillRect(0, 0, WIDTH, HEIGHT);
@@ -411,19 +453,30 @@
     function draw() {
       if (gameState === STATE_MENU) { drawMenu(); return; }
 
-      drawSprite(bgImg, 0, 0, WIDTH, HEIGHT);
+      if (bgImg.img) drawCover(bgImg.img);
+      else { ctx.fillStyle = bgImg.color; ctx.fillRect(0, 0, WIDTH, HEIGHT); }
 
       if (bg2Img.img) {
-        const bg2Offset = -(worldX * 0.3 % WIDTH);
-        ctx.drawImage(bg2Img.img, bg2Offset, 0, WIDTH, HEIGHT);
-        ctx.drawImage(bg2Img.img, bg2Offset + WIDTH, 0, WIDTH, HEIGHT);
+        // Дальний план: две плитки со «сжатием» под пропорции экрана
+        const scale = Math.max(WIDTH / bg2Img.img.width, HEIGHT / bg2Img.img.height);
+        const tw = bg2Img.img.width * scale, th = bg2Img.img.height * scale;
+        const off = -(worldX * 0.3 % tw);
+        ctx.drawImage(bg2Img.img, off, (HEIGHT - th) / 2, tw, th);
+        ctx.drawImage(bg2Img.img, off + tw, (HEIGHT - th) / 2, tw, th);
       }
 
       for (const c of clouds) ctx.drawImage(c.surf, c.x, c.y);
 
-      const groundOffset = -(worldX % WIDTH);
-      drawSprite(groundImg, groundOffset, HEIGHT - GROUND_H, WIDTH, GROUND_H);
-      drawSprite(groundImg, groundOffset + WIDTH, HEIGHT - GROUND_H, WIDTH, GROUND_H);
+      // Трава кладётся плитками в её родной пропорции, без растягивания
+      if (groundImg.img) {
+        const tw = groundImg.img.width * (GROUND_H / groundImg.img.height);
+        const groundOffset = -(worldX % tw);
+        for (let gx = groundOffset; gx < WIDTH; gx += tw) {
+          ctx.drawImage(groundImg.img, gx, HEIGHT - GROUND_H, tw, GROUND_H);
+        }
+      } else {
+        drawSprite(groundImg, 0, HEIGHT - GROUND_H, WIDTH, GROUND_H);
+      }
 
       // Препятствия рисуются с вращением вокруг своего центра
       for (const obs of obstacles) {
@@ -493,6 +546,9 @@
         drawRoundButton(gameoverButtons.menu.x, gameoverButtons.menu.y, gameoverButtons.menu.w, gameoverButtons.menu.h, gameoverButtons.menu.text, gameoverButtons.menu.font);
       }
     }
+
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
 
     function loop() { update(); draw(); requestAnimationFrame(loop); }
     loop();
