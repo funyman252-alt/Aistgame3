@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Аист-скакун</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #111; overflow: hidden; touch-action: none; }
+    body { display: flex; align-items: center; justify-content: center; }
+    canvas { max-width: 100vw; max-height: 100vh; width: 100%; height: auto; aspect-ratio: 4 / 3; display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="800" height="600"></canvas>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    // --- КОНСТАНТЫ ---
+    const WIDTH = 800, HEIGHT = 600;
+    const GROUND_H = 60;
+    const GRASS_DEPTH = 25;
+    const STAND_Y = HEIGHT - GROUND_H + GRASS_DEPTH;
+    const GRAVITY = 1;
+    const JUMP_SPEED = -21;
+    const PLAYER_HITBOX_SHRINK_X = 45;
+    const PLAYER_HITBOX_SHRINK_Y = 40;
+    const PLAYER_DRAW_OFFSET_Y = 25;   // аист рисуется ниже на столько пикселей (больше = ниже)
+    const OBSTACLE_DRAW_OFFSET_Y = 15; // препятствия рисуются ниже на столько пикселей
+    const RUN_FRAME_TICKS = 6;    // смена кадра бега (в тиках)
+    const START_FRAME_TICKS = 12; // смена кадра заставки
+
+    const STATE_MENU = 'menu', STATE_PLAYING = 'playing', STATE_GAMEOVER = 'gameover';
+    let gameState = STATE_MENU;
+
+    // --- ЗАГРУЗКА КАРТИНОК (с заглушкой) ---
+    function loadSprite(path, w, h, fallbackColor) {
+      const spr = { img: null, w, h, color: fallbackColor };
+      const image = new Image();
+      image.onload = () => { spr.img = image; };
+      image.onerror = () => { console.log('Нет файла ' + path + ' — цветная заглушка.'); };
+      image.src = path;
+      return spr;
+    }
+    function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+    // --- СПРАЙТЫ ---
+    const bgImg       = loadSprite('background.png', WIDTH, HEIGHT, '#87ceeb');
+    const bg2Img      = loadSprite('bg2.png', WIDTH, HEIGHT, null); // дальний план (опционально)
+    const groundImg   = loadSprite('ground.png', WIDTH, GROUND_H, '#228b22');
+    const obstacleImg = loadSprite('obstacle.png', 60, 90, '#c83232'); // запасная, если нет вариантов
+    const playerImg   = loadSprite('player.png', 100, 100, '#0064ff');
+
+    // Варианты препятствий obstacle1.png ... obstacle5.png
+    const obstacleVariants = [];
+    for (let i = 1; i <= 5; i++) obstacleVariants.push(loadSprite('obstacle' + i + '.png', 60, 90, null));
+
+    // Кадры бега run1.png ... run4.png
+    const runFrames = [];
+    for (let i = 1; i <= 4; i++) runFrames.push(loadSprite('run' + i + '.png', 100, 100, null));
+
+    // Кадры прыжка
+    const jumpUpImg   = loadSprite('jump1.png', 100, 100, null); // взлёт
+    const jumpDownImg = loadSprite('jump2.png', 100, 100, null); // падение
+
+    // Заставка: кадры фона и аиста
+    const startFrames = [];
+    for (let i = 1; i <= 3; i++) startFrames.push(loadSprite('start_frame' + i + '.png', WIDTH, HEIGHT, null));
+ // Злой аист для экрана «Игра окончена»
+    const angryImg = loadSprite('angry.png', 140, 140, null);   
+    const playerStartFrames = [];
+    for (let i = 1; i <= 3; i++) playerStartFrames.push(loadSprite('player_start' + i + '.png', 100, 100, null));
+
+    // --- ЗВУКИ ---
+    const jumpSound = new Audio('jump.wav'); jumpSound.volume = 0.6;
+    const hitSound  = new Audio('hit.wav');  hitSound.volume  = 0.7;
+    const music     = new Audio('music.ogg'); music.volume = 0.4; music.loop = true;
+    let musicStarted = false;
+    function tryPlay(sound) { sound.play().catch(() => {}); }
+
+    // --- ОБЛАКА (параллакс) ---
+    function makeCloud(w, h) {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const g = c.getContext('2d');
+      g.fillStyle = 'rgba(255,255,255,0.78)';
+      g.beginPath(); g.ellipse(w / 2, h * 2 / 3, w / 2, h / 3, 0, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.ellipse(w * 0.35, h * 0.5, w / 5, h / 2, 0, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.ellipse(w * 0.75, h * 0.6, w / 4, h * 0.4, 0, 0, Math.PI * 2); g.fill();
+      return c;
+    }
+
+    const clouds = [];
+    for (let i = 0; i < 7; i++) {
+      const w = randomInt(90, 180), h = randomInt(30, 55);
+      clouds.push({ surf: makeCloud(w, h), x: randomInt(-100, WIDTH), y: randomInt(30, HEIGHT / 2), speed: 0.15 + Math.random() * 0.3 });
+    }
+
+    // --- СОСТОЯНИЕ ---
+    const player = { x: 150, bottom: STAND_Y, w: 125, h: 125, velocityY: 0, onGround: true };
+    let worldSpeed = 6, worldX = 0, nextObstacleX = 600;
+    let obstacles = [];
+    let score = 0, lastScore = 0, bestScore = 0;
+    try { bestScore = parseInt(localStorage.getItem('aist_best') || '0', 10); } catch (e) {}
+
+    let tick = 0;       // общий счётчик кадров (для всех анимаций)
+    let frameIndex = 0; // текущий кадр бега
+
+    function resetGame() {
+      obstacles = []; worldSpeed = 6; worldX = 0; nextObstacleX = 600;
+      score = 0; player.bottom = STAND_Y; player.velocityY = 0; player.onGround = true;
+      frameIndex = 0;
+    }
+
+    function startGame() {
+      resetGame();
+      gameState = STATE_PLAYING;
+      if (!musicStarted) { musicStarted = true; tryPlay(music); }
+    }
+
+    function playerHitbox() {
+      return {
+        x: player.x + PLAYER_HITBOX_SHRINK_X / 2,
+        y: player.bottom - player.h + PLAYER_HITBOX_SHRINK_Y / 2,
+        w: player.w - PLAYER_HITBOX_SHRINK_X,
+        h: player.h - PLAYER_HITBOX_SHRINK_Y
+      };
+    }
+
+    // --- ВВОД ---
+    function handleInput() {
+      if (gameState === STATE_MENU) startGame();
+      else if (gameState === STATE_PLAYING) {
+        if (player.onGround) {
+          player.velocityY = JUMP_SPEED;
+          player.onGround = false;
+          tryPlay(jumpSound);
+        }
+      } else if (gameState === STATE_GAMEOVER) startGame();
+    }
+    canvas.addEventListener('pointerdown', handleInput);
+    window.addEventListener('keydown', e => {
+      if (e.code === 'Space') { e.preventDefault(); handleInput(); }
+    });
+
+    // --- ВЫБОР СПРАЙТА ПРЕПЯТСТВИЯ ---
+    function getObstacleSprite() {
+      const loaded = obstacleVariants.filter(s => s.img);
+      return loaded.length ? loaded[randomInt(0, loaded.length - 1)] : obstacleImg;
+    }
+
+    // --- ОБНОВЛЕНИЕ ---
+    function update() {
+      tick++;
+
+      if (gameState !== STATE_PLAYING) {
+        for (const c of clouds) {
+          c.x -= 0.5 * c.speed;
+          if (c.surf.width + c.x < -20) { c.x = WIDTH + randomInt(0, 200); c.y = randomInt(30, HEIGHT / 2); }
+        }
+        return;
+      }
+
+      worldX += worldSpeed;
+
+      for (const c of clouds) {
+        c.x -= worldSpeed * c.speed;
+        if (c.surf.width + c.x < -20) { c.x = WIDTH + randomInt(0, 200); c.y = randomInt(30, HEIGHT / 2); }
+      }
+
+      for (const obs of obstacles) obs.x -= worldSpeed;
+
+      if (worldX + WIDTH > nextObstacleX) {
+        const w = randomInt(44, 77), h = randomInt(55, 99); // размеры +10% к исходным
+        obstacles.push({ x: WIDTH + 50, y: STAND_Y - h, w, h, passed: false, spr: getObstacleSprite() });
+        nextObstacleX += randomInt(350, 650);
+      }
+      obstacles = obstacles.filter(o => o.x + o.w > -50);
+
+      player.velocityY += GRAVITY;
+      player.bottom += player.velocityY;
+      if (player.bottom >= STAND_Y) { player.bottom = STAND_Y; player.velocityY = 0; player.onGround = true; }
+
+      // Анимация бега: кадр меняется каждые RUN_FRAME_TICKS тиков
+      if (tick % RUN_FRAME_TICKS === 0) {
+        const loaded = runFrames.filter(s => s.img);
+        if (loaded.length) frameIndex = (frameIndex + 1) % loaded.length;
+      }
+
+      const hitbox = playerHitbox();
+      for (const obs of obstacles) {
+        if (!obs.passed && obs.x + obs.w < player.x) { obs.passed = true; score += 1; }
+        const obsHitbox = { x: obs.x + 7, y: obs.y + 9, w: obs.w - 14, h: obs.h - 18 };
+        const collide =
+          hitbox.x < obsHitbox.x + obsHitbox.w && hitbox.x + hitbox.w > obsHitbox.x &&
+          hitbox.y < obsHitbox.y + obsHitbox.h && hitbox.y + hitbox.h > obsHitbox.y;
+        if (collide) {
+          gameState = STATE_GAMEOVER;
+          lastScore = score;
+          if (score > bestScore) {
+            bestScore = score;
+            try { localStorage.setItem('aist_best', String(bestScore)); } catch (e) {}
+          }
+          tryPlay(hitSound);
+          break;
+        }
+      }
+
+      worldSpeed += 0.002;
+    }
+
+    // --- ОТРИСОВКА ---
+    function drawSprite(spr, x, y, w, h) {
+      if (spr && spr.img) ctx.drawImage(spr.img, x, y, w, h);
+      else if (spr) { ctx.fillStyle = spr.color || '#888'; ctx.fillRect(x, y, w, h); }
+    }
+
+    // Какой спрайт показать у аиста сейчас
+    function getPlayerSprite() {
+      if (gameState === STATE_MENU) {
+        const loaded = playerStartFrames.filter(s => s.img);
+        if (loaded.length) return loaded[Math.floor(tick / START_FRAME_TICKS) % loaded.length];
+        return playerImg;
+      }
+      if (gameState === STATE_PLAYING && !player.onGround) {
+        if (player.velocityY < 0 && jumpUpImg.img) return jumpUpImg;
+        if (player.velocityY >= 0 && jumpDownImg.img) return jumpDownImg;
+        return playerImg;
+      }
+      const loaded = runFrames.filter(s => s.img);
+      if (loaded.length) return loaded[frameIndex % loaded.length];
+      return playerImg;
+    }
+
+    function drawRoundButton(x, y, w, h, text) {
+      ctx.fillStyle = '#e8a13a';
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 15);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.font = 'bold 32px Arial';
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, x + w / 2, y + h / 2);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    function drawMenu() {
+      // Фон заставки: анимированные кадры или заглушка
+      const loadedStart = startFrames.filter(s => s.img);
+      if (loadedStart.length) {
+        const frameIdx = Math.floor(tick / START_FRAME_TICKS) % loadedStart.length;
+        drawSprite(loadedStart[frameIdx], 0, 0, WIDTH, HEIGHT);
+      } else {
+        ctx.fillStyle = '#1e5f8a';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      }
+
+      // Облака (плывут даже на заставке)
+      for (const c of clouds) ctx.drawImage(c.surf, c.x, c.y);
+
+      // Кнопка «ИГРАТЬ»
+      drawRoundButton(WIDTH / 2 - 120, HEIGHT / 2 + 20, 240, 70, 'ИГРАТЬ');
+
+      // Рекорд и подсказка
+      ctx.textAlign = 'center';
+      ctx.font = '24px Arial';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('Рекорд: ' + bestScore, WIDTH / 2, HEIGHT / 2 + 140);
+      ctx.font = '20px Arial';
+      ctx.fillStyle = '#cccccc';
+      ctx.fillText('Тапни или нажми пробел', WIDTH / 2, HEIGHT / 2 + 175);
+      ctx.textAlign = 'left';
+    }
+
+    function draw() {
+      if (gameState === STATE_MENU) { drawMenu(); return; }
+
+      // Фон (статичный)
+      drawSprite(bgImg, 0, 0, WIDTH, HEIGHT);
+
+      // Дальний план bg2.png — едет медленнее мира (параллакс)
+      if (bg2Img.img) {
+        const bg2Offset = -(worldX * 0.3 % WIDTH);
+        ctx.drawImage(bg2Img.img, bg2Offset, 0, WIDTH, HEIGHT);
+        ctx.drawImage(bg2Img.img, bg2Offset + WIDTH, 0, WIDTH, HEIGHT);
+      }
+
+      for (const c of clouds) ctx.drawImage(c.surf, c.x, c.y);
+
+      const groundOffset = -(worldX % WIDTH);
+      drawSprite(groundImg, groundOffset, HEIGHT - GROUND_H, WIDTH, GROUND_H);
+      drawSprite(groundImg, groundOffset + WIDTH, HEIGHT - GROUND_H, WIDTH, GROUND_H);
+
+      // Препятствия — рисуются ниже на OBSTACLE_DRAW_OFFSET_Y (хитбоксы не тронуты)
+      for (const obs of obstacles) drawSprite(obs.spr, obs.x, obs.y + OBSTACLE_DRAW_OFFSET_Y, obs.w, obs.h);
+
+      // Аист — рисуется ниже на PLAYER_DRAW_OFFSET_Y (хитбокс не тронут)
+      drawSprite(getPlayerSprite(), player.x, player.bottom - player.h + PLAYER_DRAW_OFFSET_Y, player.w, player.h);
+
+      ctx.font = '28px Arial';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText('Очки: ' + score, 20, 40);
+
+      if (gameState === STATE_GAMEOVER) {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+// Злой аист с лёгким покачиванием
+        const angryBob = Math.sin(tick * 0.08) * 6; // амплитуда 6 пикселей
+        drawSprite(angryImg, WIDTH / 2 - 70, HEIGHT / 2 - 230 + angryBob, 140, 140);
+
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 52px Arial';
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillText('КОНЕЦ ИГРЫ', WIDTH / 2, HEIGHT / 2 - 70);
+
+        ctx.font = '36px Arial';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('Ваш счёт: ' + lastScore, WIDTH / 2, HEIGHT / 2 - 10);
+
+        ctx.font = '28px Arial';
+        ctx.fillStyle = '#ffd75e';
+        ctx.fillText('Рекорд: ' + bestScore, WIDTH / 2, HEIGHT / 2 + 35);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText('Коснитесь экрана — заново', WIDTH / 2, HEIGHT / 2 + 100);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    function loop() { update(); draw(); requestAnimationFrame(loop); }
+    loop();
+  </script>
+</body>
+</html>
